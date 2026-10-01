@@ -6,12 +6,18 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -31,6 +37,7 @@ public class UcharClient implements ClientModInitializer {
 
 	private static KeyMapping toggleKey;
 	private static KeyMapping speedKey;
+	private static KeyMapping portalKey;
 
 	private static boolean enabled = false;
 	private static int speedIndex = 1;
@@ -41,6 +48,9 @@ public class UcharClient implements ClientModInitializer {
 				"key.uchar.toggle", InputConstants.Type.KEYSYM, InputConstants.KEY_G, "key.categories.uchar"));
 		speedKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
 				"key.uchar.speed", InputConstants.Type.KEYSYM, InputConstants.KEY_H, "key.categories.uchar"));
+
+		portalKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+				"key.uchar.portal", InputConstants.Type.KEYSYM, InputConstants.KEY_P, "key.categories.uchar"));
 
 		ClientTickEvents.END_CLIENT_TICK.register(UcharClient::onTick);
 	}
@@ -68,6 +78,10 @@ public class UcharClient implements ClientModInitializer {
 		while (speedKey.consumeClick()) {
 			speedIndex = (speedIndex + 1) % SPEEDS.length;
 			message(client, "§eUchish tezligi: " + (int) SPEEDS[speedIndex] + "x");
+		}
+
+		while (portalKey.consumeClick()) {
+			findPortal(client);
 		}
 
 		if (!enabled) {
@@ -173,6 +187,91 @@ public class UcharClient implements ClientModInitializer {
 			a.flying = false;
 			a.setFlyingSpeed(BASE_SPEED);
 		}
+	}
+
+	// ---------- End portalini qidirish ----------
+
+	/**
+	 * Yuklangan chunk'lar ichidan eng yaqin End portal ramkasini topadi
+	 * va uning koordinatasi, masofasi va yo'nalishini chatga yozadi.
+	 */
+	private static void findPortal(Minecraft client) {
+		ClientLevel level = client.level;
+		LocalPlayer player = client.player;
+
+		if (level == null || player == null) {
+			return;
+		}
+
+		int radius = Math.min(client.options.renderDistance().get(), 16);
+		int pcx = player.blockPosition().getX() >> 4;
+		int pcz = player.blockPosition().getZ() >> 4;
+		BlockPos best = null;
+		double bestDist = Double.MAX_VALUE;
+
+		for (int cx = pcx - radius; cx <= pcx + radius; cx++) {
+			for (int cz = pcz - radius; cz <= pcz + radius; cz++) {
+				if (!level.hasChunk(cx, cz)) {
+					continue;
+				}
+
+				LevelChunk chunk = level.getChunk(cx, cz);
+				LevelChunkSection[] sections = chunk.getSections();
+
+				for (int i = 0; i < sections.length; i++) {
+					LevelChunkSection section = sections[i];
+
+					// Tez tekshiruv: bu bo'lakda portal ramkasi umuman bormi?
+					if (section.hasOnlyAir() || !section.maybeHas(state -> state.is(Blocks.END_PORTAL_FRAME))) {
+						continue;
+					}
+
+					int baseY = SectionPos.sectionToBlockCoord(chunk.getSectionYFromSectionIndex(i));
+
+					for (int x = 0; x < 16; x++) {
+						for (int y = 0; y < 16; y++) {
+							for (int z = 0; z < 16; z++) {
+								if (!section.getBlockState(x, y, z).is(Blocks.END_PORTAL_FRAME)) {
+									continue;
+								}
+
+								int bx = (cx << 4) + x;
+								int by = baseY + y;
+								int bz = (cz << 4) + z;
+								double d = player.distanceToSqr(bx + 0.5, by + 0.5, bz + 0.5);
+
+								if (d < bestDist) {
+									bestDist = d;
+									best = new BlockPos(bx, by, bz);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (best == null) {
+			player.displayClientMessage(Component.literal("§7Yaqin atrofda End portali topilmadi. Ender ko'zi ko'rsatgan tomonga uchib, yana P ni bosing."), false);
+			return;
+		}
+
+		int dist = (int) Math.sqrt(bestDist);
+		String dir = direction(best.getX() + 0.5 - player.getX(), best.getZ() + 0.5 - player.getZ());
+		player.displayClientMessage(Component.literal("§dEnd portali topildi! §fX: " + best.getX() + "  Y: " + best.getY() + "  Z: " + best.getZ()
+				+ " §7(" + dist + " blok, " + dir + ")"), false);
+	}
+
+	/** Kompas yo'nalishi: shimol = -Z, janub = +Z, sharq = +X, g'arb = -X. */
+	private static String direction(double dx, double dz) {
+		double angle = Math.toDegrees(Math.atan2(dx, -dz));
+
+		if (angle < 0) {
+			angle += 360;
+		}
+
+		String[] names = {"shimolda", "shimoli-sharqda", "sharqda", "janubi-sharqda", "janubda", "janubi-g'arbda", "g'arbda", "shimoli-g'arbda"};
+		return names[(int) Math.round(angle / 45.0) % 8];
 	}
 
 	private static void message(Minecraft client, String text) {
