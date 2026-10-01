@@ -10,6 +10,7 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
@@ -18,6 +19,7 @@ import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.phys.AABB;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -38,6 +40,10 @@ public class UcharClient implements ClientModInitializer {
 	private static KeyMapping toggleKey;
 	private static KeyMapping speedKey;
 	private static KeyMapping portalKey;
+	private static KeyMapping clipKey;
+
+	/** Devordan o'tishda eng uzoq masofa (blok). */
+	private static final int MAX_CLIP = 4;
 
 	private static boolean enabled = false;
 	private static int speedIndex = 1;
@@ -51,6 +57,9 @@ public class UcharClient implements ClientModInitializer {
 
 		portalKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
 				"key.uchar.portal", InputConstants.Type.KEYSYM, InputConstants.KEY_P, "key.categories.uchar"));
+
+		clipKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+				"key.uchar.clip", InputConstants.Type.KEYSYM, InputConstants.KEY_V, "key.categories.uchar"));
 
 		ClientTickEvents.END_CLIENT_TICK.register(UcharClient::onTick);
 	}
@@ -82,6 +91,10 @@ public class UcharClient implements ClientModInitializer {
 
 		while (portalKey.consumeClick()) {
 			findPortal(client);
+		}
+
+		while (clipKey.consumeClick()) {
+			clip(client);
 		}
 
 		if (!enabled) {
@@ -187,6 +200,63 @@ public class UcharClient implements ClientModInitializer {
 			a.flying = false;
 			a.setFlyingSpeed(BASE_SPEED);
 		}
+	}
+
+	// ---------- Devordan o'tish (tajriba) ----------
+
+	/**
+	 * Qarab turgan tomoningizdagi 1-3 blokli devor ortidagi bo'sh joyga o'tkazadi.
+	 * Pastga qarasangiz (polga) pastga, tepaga qarasangiz tepaga o'tadi.
+	 * Diqqat: server buni rad etib, sizni orqaga qaytarishi mumkin.
+	 */
+	private static void clip(Minecraft client) {
+		LocalPlayer player = client.player;
+
+		if (player == null || client.level == null || client.getConnection() == null) {
+			return;
+		}
+
+		int sx;
+		int sy;
+		int sz;
+
+		if (player.getXRot() > 60) {
+			sx = 0; sy = -1; sz = 0;
+		} else if (player.getXRot() < -60) {
+			sx = 0; sy = 1; sz = 0;
+		} else {
+			Direction facing = player.getDirection();
+			sx = facing.getStepX(); sy = 0; sz = facing.getStepZ();
+		}
+
+		AABB box = player.getBoundingBox();
+		boolean wall = false;
+
+		for (int d = 1; d <= MAX_CLIP; d++) {
+			double dy = sy * d;
+			AABB moved = box.move(sx * d, dy, sz * d);
+
+			if (!client.level.noCollision(player, moved)) {
+				wall = true;
+				continue;
+			}
+
+			if (!wall) {
+				message(client, "§7Oldingizda devor yo'q");
+				return;
+			}
+
+			double x = player.getX() + sx * d;
+			double y = player.getY() + dy;
+			double z = player.getZ() + sz * d;
+
+			player.setPos(x, y, z);
+			client.getConnection().send(new ServerboundMovePlayerPacket.Pos(x, y, z, player.onGround()));
+			message(client, "§bDevordan o'tildi");
+			return;
+		}
+
+		message(client, "§cDevor juda qalin (" + (MAX_CLIP - 1) + " blokdan ko'p)");
 	}
 
 	// ---------- End portalini qidirish ----------
