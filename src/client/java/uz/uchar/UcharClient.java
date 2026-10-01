@@ -6,8 +6,10 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Abilities;
 
@@ -16,10 +18,11 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 
 /**
- * Bir kishilik survival dunyoda uchish.
- * O'yinning o'zidagi (creative'dagi kabi) uchish qobiliyatini yoqadi:
- * Space tugmasini ikki marta bosib uchasiz, Shift bilan pastga tushasiz.
- * Uchish yoqilgan paytda balanddan yiqilsangiz ham jon kamaymaydi.
+ * Survival'da uchish (creative'dagidek: Space'ni ikki marta bosib uchasiz).
+ *
+ * Bir kishilik dunyoda: o'yinning ichki serverida uchish qobiliyati yoqiladi.
+ * Serverda (masalan, Aternos): uchish faqat sizning tomoningizda yoqiladi.
+ * Server sizni kick qilmasligi uchun unda allow-flight yoqilgan bo'lishi kerak.
  */
 public class UcharClient implements ClientModInitializer {
 	/** O'yindagi standart uchish tezligi 0.05. */
@@ -42,14 +45,13 @@ public class UcharClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(UcharClient::onTick);
 	}
 
+	private static float speed() {
+		return BASE_SPEED * SPEEDS[speedIndex];
+	}
+
 	private static void onTick(Minecraft client) {
 		while (toggleKey.consumeClick()) {
 			if (client.player == null) {
-				continue;
-			}
-
-			if (!client.hasSingleplayerServer()) {
-				message(client, "§cUchish faqat bir kishilik dunyoda ishlaydi");
 				continue;
 			}
 
@@ -72,23 +74,29 @@ public class UcharClient implements ClientModInitializer {
 			return;
 		}
 
-		// Dunyodan chiqqanda yoki serverga ulanganda avtomatik o'chadi.
-		if (client.player == null || !client.hasSingleplayerServer()) {
+		// Dunyodan chiqqanda avtomatik o'chadi.
+		if (client.player == null || client.getConnection() == null) {
 			enabled = false;
 			return;
 		}
 
-		turnOn(client);
+		if (client.hasSingleplayerServer()) {
+			turnOnSingleplayer(client);
+		} else {
+			turnOnMultiplayer(client);
+		}
 	}
 
+	// ---------- Bir kishilik dunyo ----------
+
 	/**
-	 * Har tikda tekshiradi: o'lgandan keyin yoki boshqa dunyoga (Nether, End) o'tganda
+	 * Har tikda tekshiradi: o'lgandan keyin yoki Nether/End'ga o'tganda
 	 * o'yin qobiliyatlarni qayta tiklaydi, shuning uchun ularni yana yoqamiz.
 	 */
-	private static void turnOn(Minecraft client) {
+	private static void turnOnSingleplayer(Minecraft client) {
 		IntegratedServer server = client.getSingleplayerServer();
 		UUID id = client.player.getUUID();
-		float speed = BASE_SPEED * SPEEDS[speedIndex];
+		float speed = speed();
 
 		server.execute(() -> {
 			ServerPlayer sp = server.getPlayerList().getPlayer(id);
@@ -107,29 +115,64 @@ public class UcharClient implements ClientModInitializer {
 		});
 	}
 
-	private static void turnOff(Minecraft client) {
-		IntegratedServer server = client.getSingleplayerServer();
+	// ---------- Server (Aternos va boshqalar) ----------
 
-		if (server == null || client.player == null) {
+	private static void turnOnMultiplayer(Minecraft client) {
+		LocalPlayer player = client.player;
+
+		if (player.isCreative() || player.isSpectator()) {
 			return;
 		}
 
-		UUID id = client.player.getUUID();
+		// Server o'lim yoki dunyo almashganda qobiliyatlarni qaytaradi, shuning uchun har tikda yoqamiz.
+		Abilities a = player.getAbilities();
+		a.mayfly = true;
+		a.setFlyingSpeed(speed());
 
-		server.execute(() -> {
-			ServerPlayer sp = server.getPlayerList().getPlayer(id);
+		if (a.flying) {
+			// Serverga "yerdaman" deb aytamiz: shunda uchib bo'lib qo'nganda
+			// server yiqilish masofasini hisoblamaydi va jon kamaymaydi.
+			client.getConnection().send(new ServerboundMovePlayerPacket.StatusOnly(true));
+		}
+	}
 
-			if (sp == null || sp.isCreative() || sp.isSpectator()) {
+	// ---------- O'chirish ----------
+
+	private static void turnOff(Minecraft client) {
+		if (client.player == null) {
+			return;
+		}
+
+		if (client.hasSingleplayerServer()) {
+			IntegratedServer server = client.getSingleplayerServer();
+			UUID id = client.player.getUUID();
+
+			server.execute(() -> {
+				ServerPlayer sp = server.getPlayerList().getPlayer(id);
+
+				if (sp == null || sp.isCreative() || sp.isSpectator()) {
+					return;
+				}
+
+				Abilities a = sp.getAbilities();
+				a.mayfly = false;
+				a.flying = false;
+				a.setFlyingSpeed(BASE_SPEED);
+				sp.resetFallDistance();
+				sp.onUpdateAbilities();
+			});
+		} else {
+			LocalPlayer player = client.player;
+
+			if (player.isCreative() || player.isSpectator()) {
 				return;
 			}
 
-			Abilities a = sp.getAbilities();
+			Abilities a = player.getAbilities();
 			a.mayfly = false;
 			a.flying = false;
 			a.setFlyingSpeed(BASE_SPEED);
-			sp.resetFallDistance();
-			sp.onUpdateAbilities();
-		});
+		}
 	}
 
 	private static void message(Minecraft client, String text) {
